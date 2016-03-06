@@ -8,6 +8,9 @@ set -o errexit
 # Ensure we have updated standard packages
 echo "* Updating standard packages.";
 
+pkgin -y up
+pkgin -y upgrade
+
 # Configuring image specific packages
 echo "* Configuring image specific packages.";
 
@@ -26,18 +29,18 @@ sudo -u git -H git clone https://gitlab.com/gitlab-org/gitlab-workhorse.git gitl
 
 echo "* Configuring gitlab-workhorse.";
 cd /home/git/gitlab-workhorse
-sudo -u git -H git checkout 0.4.2
+sudo -u git -H git checkout 0.6.5
 sudo -u git -H make
 
 echo "* Configuring gitlab-shell.";
 cd /home/git/gitlab-shell
-sudo -u git -H git checkout v2.6.8
+sudo -u git -H git checkout v2.6.10
 sudo -u git -H cp /root/gitlab-shell-config.yml config.yml
 sudo -u git -H ./bin/install
 
 echo "* Configuring gitlab.";
 cd /home/git/gitlab
-sudo -u git -H git checkout 8-3-stable
+sudo -u git -H git checkout 8-5-stable
 chown -R git {log,tmp}/
 chmod -R u+rwX  {log,tmp}/
 sudo -u git -H cp /root/gitlab-gitlab.yml config/gitlab.yml
@@ -46,18 +49,19 @@ sudo -u git -H cp /root/gitlab-database-rootparty.yml config/database.yml
 sudo -u git -H chmod o-rwx config/database.yml
 
 echo "* Installing gems.";
-sudo -u git -H NOKOGIRI_USE_SYSTEM_LIBRARIES=yes bundle install --deployment --without development test postgres aws
+sudo -u git bundle config build.charlock_holmes --with-ldflags=-lstdc++
+sudo -u git -H NOKOGIRI_USE_SYSTEM_LIBRARIES=yes bundle install --deployment --without development test mysql aws
 
-echo "* starting the MySQL instance"
-svcadm enable percona
+echo "* starting the PostgreSQL instance"
+svcadm enable -r svc:/pkgsrc/postgresql:default
 
-echo "* waiting for the socket to show up"
+echo "* waiting for the pid to show up"
 COUNT="0";
-while [[ ! -e /tmp/mysql.sock ]]; do
+while [[ ! -e /var/pgsql/data/postmaster.pid ]]; do
         sleep 1
         ((COUNT=COUNT+1))
         if [[ $COUNT -eq 60 ]]; then
-          echo "ERROR Could not talk to MySQL after 60 seconds"
+          echo "ERROR Could not talk to PostgreSQL after 60 seconds"
     ERROR=yes
     break 1
   fi
@@ -67,18 +71,21 @@ echo "(it took ${COUNT} seconds to start properly)"
 
 sleep 1
 
-[[ "$(svcs -Ho state percona)" == "online" ]] || \
-  ( echo "ERROR MySQL SMF not reporting as 'online'" && exit 1 )
+[[ "$(svcs -Ho state postgresql)" == "online" ]] || \
+  ( echo "ERROR PostgreSQL SMF not reporting as 'online'" && exit 1 )
 
 echo "* creating database"
-mysql -u root -e "CREATE DATABASE IF NOT EXISTS gitlabhq_production DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci;" >/dev/null || \
-  ( echo "ERROR MySQL query failed to execute." && exit 1 )
+sudo PGPASSWORD=postgres psql -U postgres -w -d template1 << EOF
+CREATE USER gitlab CREATEDB;
+CREATE DATABASE gitlabhq_production OWNER gitlab;
+\q
+EOF
 
 echo "* Precompiling assets.";
 sudo -u git -H bundle exec rake assets:precompile RAILS_ENV=production
 
-echo "* shutting down the MySQL instance"
-svcadm disable percona
+echo "* shutting down the PostgreSQL instance"
+svcadm disable svc:/pkgsrc/postgresql:default
 
 echo "* Reconfiguring gitlab.";
 sudo -u git -H cp /root/gitlab-database.yml config/database.yml
@@ -93,7 +100,7 @@ cp /root/nginx.conf /opt/local/etc/nginx/nginx.conf
 
 # Clean up
 echo "* Cleaning up."
-/opt/local/sbin/pkg_delete cmake gmake gcc48 pkg-config
+/opt/local/sbin/pkg_delete cmake gmake gcc49 pkg-config
 rm -rf /root/*
 rm -rf /tmp/*
 
